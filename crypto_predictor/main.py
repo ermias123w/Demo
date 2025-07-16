@@ -28,6 +28,7 @@ from .storage.database import DatabaseManager
 from .risk_management.risk_manager import RiskManager
 from .backtesting.backtester import Backtester
 from .alerts.notification_manager import NotificationManager
+from .models.reinforcement_learning import rl_manager
 
 # Configure logging
 logging.basicConfig(
@@ -391,6 +392,25 @@ class CryptoPredictionOrchestrator:
             # Evaluate predictions
             evaluation_results = self.backtester.evaluate_predictions(predictions)
             
+            # Process each prediction outcome for reinforcement learning
+            for prediction_data in predictions:
+                if prediction_data.get('actual_outcome') is not None:
+                    # Convert to PredictionResult object
+                    prediction_result = self._dict_to_prediction_result(prediction_data)
+                    
+                    # Calculate outcome
+                    outcome = {
+                        'correct': prediction_data.get('actual_outcome') == prediction_data.get('signal'),
+                        'profit_loss': prediction_data.get('profit_loss', 0),
+                        'price_change': prediction_data.get('profit_loss', 0) / prediction_data.get('leverage', 1)
+                    }
+                    
+                    # Update reinforcement learning
+                    rl_update = rl_manager.process_prediction_outcome(prediction_result, outcome)
+                    
+                    if rl_update['weights_updated']:
+                        logger.info(f"RL updated: weights={rl_update['new_weights']}, params={rl_update['new_params']}")
+            
             # Update performance metrics
             self.performance_metrics.update(evaluation_results)
             self.performance_metrics['last_updated'] = datetime.now()
@@ -508,6 +528,80 @@ class CryptoPredictionOrchestrator:
         except Exception as e:
             logger.error(f"Error running backtest: {e}")
             return {}
+    
+    def evaluate_prediction_result(self, prediction_id: str, actual_outcome: str, 
+                                 actual_price: float) -> Dict[str, Any]:
+        """Evaluate a specific prediction result"""
+        try:
+            # Get prediction from database
+            prediction_data = self.db_manager.get_prediction(prediction_id)
+            
+            if not prediction_data:
+                logger.error(f"Prediction {prediction_id} not found")
+                return {}
+            
+            # Convert to PredictionResult
+            prediction = self._dict_to_prediction_result(prediction_data)
+            
+            # Calculate outcome
+            price_change = (actual_price - prediction.entry_price) / prediction.entry_price
+            profit_loss = self._calculate_profit_loss(prediction, price_change)
+            
+            outcome = {
+                'correct': actual_outcome == prediction.signal,
+                'profit_loss': profit_loss,
+                'price_change': price_change,
+                'actual_price': actual_price,
+                'actual_outcome': actual_outcome
+            }
+            
+            # Update database with outcome
+            self.db_manager.update_prediction_outcome(prediction_id, outcome)
+            
+            # Process with reinforcement learning
+            rl_update = rl_manager.process_prediction_outcome(prediction, outcome)
+            
+            result = {
+                'prediction_id': prediction_id,
+                'outcome': outcome,
+                'rl_update': rl_update,
+                'evaluation_time': datetime.now()
+            }
+            
+            logger.info(f"Prediction evaluated: {prediction_id} - {outcome}")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error evaluating prediction: {e}")
+            return {}
+    
+    def _dict_to_prediction_result(self, prediction_data: Dict) -> PredictionResult:
+        """Convert dictionary to PredictionResult object"""
+        from .models.hybrid_models import PredictionResult
+        
+        return PredictionResult(
+            symbol=prediction_data.get('symbol'),
+            signal=prediction_data.get('signal'),
+            confidence=prediction_data.get('confidence', 0.0),
+            entry_price=prediction_data.get('entry_price', 0.0),
+            stop_loss=prediction_data.get('stop_loss', 0.0),
+            take_profit=prediction_data.get('take_profit', 0.0),
+            leverage=prediction_data.get('leverage', 1.0),
+            sentiment_score=prediction_data.get('sentiment_score', 0.0),
+            technical_features=prediction_data.get('technical_features', []),
+            rationale=prediction_data.get('rationale', ''),
+            timestamp=prediction_data.get('timestamp', datetime.now())
+        )
+    
+    def _calculate_profit_loss(self, prediction: PredictionResult, price_change: float) -> float:
+        """Calculate profit/loss based on prediction and price change"""
+        if prediction.signal == 'BUY':
+            return price_change * prediction.leverage
+        elif prediction.signal == 'SELL':
+            return -price_change * prediction.leverage
+        else:
+            return 0.0
 
 # Global orchestrator instance
 orchestrator = CryptoPredictionOrchestrator()
